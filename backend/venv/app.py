@@ -4,13 +4,21 @@ import requests
 import xml.etree.ElementTree as ET
 import re
 from datetime import datetime
+import os
+import tempfile
+import PyPDF2
+from io import BytesIO
+import fitz  # PyMuPDF - alternative PDF parser
 
 app = Flask(__name__)
 
 # Enable CORS for all routes and origins
 CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000"])
 
-# Mock data as fallback
+# Store downloaded paper content in memory (in production, use a database)
+paper_content_cache = {}
+
+# Mock data as fallback (keeping your existing mock data)
 MOCK_PAPERS = [
     {
         "title": "Attention Is All You Need",
@@ -19,42 +27,76 @@ MOCK_PAPERS = [
         "link": "https://arxiv.org/abs/1706.03762",
         "published": "2017-06-12T17:18:52Z"
     },
-    {
-        "title": "Deep Residual Learning for Image Recognition",
-        "authors": ["Kaiming He", "Xiangyu Zhang", "Shaoqing Ren", "Jian Sun"],
-        "summary": "Deeper neural networks are more difficult to train. We present a residual learning framework to ease the training of networks that are substantially deeper than those used previously. We explicitly reformulate the layers as learning residual functions with reference to the layer inputs, instead of learning unreferenced functions.",
-        "link": "https://arxiv.org/abs/1512.03385",
-        "published": "2015-12-10T18:40:12Z"
-    },
-    {
-        "title": "Generative Adversarial Networks",
-        "authors": ["Ian J. Goodfellow", "Jean Pouget-Abadie", "Mehdi Mirza"],
-        "summary": "We propose a new framework for estimating generative models via an adversarial process, in which we simultaneously train two models: a generative model G that captures the data distribution, and a discriminative model D that estimates the probability that a sample came from the training data rather than G.",
-        "link": "https://arxiv.org/abs/1406.2661",
-        "published": "2014-06-10T19:55:15Z"
-    },
-    {
-        "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
-        "authors": ["Jacob Devlin", "Ming-Wei Chang", "Kenton Lee", "Kristina Toutanova"],
-        "summary": "We introduce a new language representation model called BERT, which stands for Bidirectional Encoder Representations from Transformers. Unlike recent language representation models, BERT is designed to pre-train deep bidirectional representations from unlabeled text by jointly conditioning on both left and right context in all layers.",
-        "link": "https://arxiv.org/abs/1810.04805",
-        "published": "2018-10-11T18:33:37Z"
-    },
-    {
-        "title": "Mastering the Game of Go with Deep Neural Networks and Tree Search",
-        "authors": ["David Silver", "Aja Huang", "Chris J. Maddison"],
-        "summary": "The game of Go has long been viewed as the most challenging of classic games for artificial intelligence owing to its enormous search space and the difficulty of evaluating board positions and moves. Here we introduce a new approach to computer Go that uses 'value networks' to evaluate board positions and 'policy networks' to select moves.",
-        "link": "https://arxiv.org/abs/1712.01815",
-        "published": "2017-12-05T18:40:45Z"
-    },
-    {
-        "title": "Language Models are Few-Shot Learners",
-        "authors": ["Tom B. Brown", "Benjamin Mann", "Nick Ryder"],
-        "summary": "Recent work has demonstrated substantial gains on many NLP tasks and benchmarks by pre-training on a large corpus of text followed by fine-tuning on a specific task. While typically task-agnostic in architecture, this method still requires task-specific fine-tuning datasets of thousands or tens of thousands of examples.",
-        "link": "https://arxiv.org/abs/2005.14165",
-        "published": "2020-05-28T17:29:03Z"
-    }
+    # ... (rest of your mock papers)
 ]
+
+def download_paper_pdf(paper_link, paper_id):
+    """Download and extract text from a paper PDF"""
+    try:
+        # For arXiv papers, convert to PDF download link
+        if 'arxiv.org/abs/' in paper_link:
+            pdf_link = paper_link.replace('/abs/', '/pdf/') + '.pdf'
+        else:
+            pdf_link = paper_link
+        
+        print(f"📄 Downloading PDF from: {pdf_link}")
+        
+        # Download the PDF
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(pdf_link, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        if response.status_code != 200:
+            print(f"❌ Failed to download PDF: HTTP {response.status_code}")
+            return None
+        
+        # Extract text using PyMuPDF (more reliable than PyPDF2)
+        try:
+            pdf_document = fitz.open(stream=response.content, filetype="pdf")
+            full_text = ""
+            
+            for page_num in range(pdf_document.page_count):
+                page = pdf_document.load_page(page_num)
+                text = page.get_text()
+                full_text += f"\n--- Page {page_num + 1} ---\n{text}"
+            
+            pdf_document.close()
+            
+            if len(full_text.strip()) < 100:
+                print("⚠️  Extracted text too short, might be a scan or protected PDF")
+                return None
+                
+            print(f"✅ Successfully extracted {len(full_text)} characters from PDF")
+            return full_text
+            
+        except Exception as pdf_error:
+            print(f"❌ Error extracting text from PDF: {pdf_error}")
+            
+            # Fallback to PyPDF2
+            try:
+                pdf_reader = PyPDF2.PdfReader(BytesIO(response.content))
+                full_text = ""
+                
+                for page in pdf_reader.pages:
+                    full_text += page.extract_text() + "\n"
+                
+                if len(full_text.strip()) < 100:
+                    print("⚠️  PyPDF2 extraction also yielded minimal text")
+                    return None
+                    
+                print(f"✅ PyPDF2 fallback extracted {len(full_text)} characters")
+                return full_text
+                
+            except Exception as fallback_error:
+                print(f"❌ PyPDF2 fallback also failed: {fallback_error}")
+                return None
+                
+    except Exception as e:
+        print(f"❌ Error downloading paper PDF: {e}")
+        return None
 
 def fetch_arxiv_papers_simple(query="Computer Architecture", max_results=6):
     """Simple arXiv fetch with immediate fallback to mock data"""
@@ -104,12 +146,17 @@ def fetch_arxiv_papers_simple(query="Computer Architecture", max_results=6):
                     if name is not None:
                         authors.append(name.text.strip())
                 
+                # Generate a unique paper ID
+                paper_id = f"{hash(link)}_{len(papers)}"
+                
                 papers.append({
+                    'id': paper_id,
                     'title': title,
                     'authors': authors if authors else ['Unknown Author'],
                     'summary': re.sub(r'\s+', ' ', summary),
                     'link': link,
-                    'published': published
+                    'published': published,
+                    'has_full_text': False  # Will be updated when PDF is downloaded
                 })
                 
             except Exception as e:
@@ -132,14 +179,21 @@ def get_mock_papers_for_query(query, max_results):
     query_words = query.lower().split()
     relevant_papers = []
     
-    for paper in MOCK_PAPERS:
+    for i, paper in enumerate(MOCK_PAPERS):
         paper_text = f"{paper['title']} {paper['summary']}".lower()
         if any(word in paper_text for word in query_words):
-            relevant_papers.append(paper.copy())
+            paper_copy = paper.copy()
+            paper_copy['id'] = f"mock_{i}"
+            paper_copy['has_full_text'] = False
+            relevant_papers.append(paper_copy)
     
     # If no relevant papers found, return some random papers
     if not relevant_papers:
-        relevant_papers = MOCK_PAPERS[:max_results]
+        for i, paper in enumerate(MOCK_PAPERS[:max_results]):
+            paper_copy = paper.copy()
+            paper_copy['id'] = f"mock_{i}"
+            paper_copy['has_full_text'] = False
+            relevant_papers.append(paper_copy)
     
     # Add query-specific category
     for paper in relevant_papers:
@@ -182,6 +236,137 @@ def search():
             'timestamp': datetime.now().isoformat()
         }), 500
 
+@app.route('/download-paper/<paper_id>', methods=['POST'])
+def download_paper(paper_id):
+    """Download and cache the full text of a paper"""
+    try:
+        data = request.get_json()
+        paper_link = data.get('link')
+        
+        if not paper_link:
+            return jsonify({
+                'success': False,
+                'error': 'Paper link is required'
+            }), 400
+        
+        print(f"📥 Download request for paper {paper_id}: {paper_link}")
+        
+        # Check if already cached
+        if paper_id in paper_content_cache:
+            print(f"📚 Paper {paper_id} already cached")
+            return jsonify({
+                'success': True,
+                'message': 'Paper already downloaded',
+                'has_full_text': True,
+                'text_length': len(paper_content_cache[paper_id])
+            })
+        
+        # Download and extract text
+        full_text = download_paper_pdf(paper_link, paper_id)
+        
+        if full_text is None:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to download or extract text from PDF',
+                'message': 'The paper might be a scanned document, behind a paywall, or in an unsupported format.'
+            }), 400
+        
+        # Cache the content
+        paper_content_cache[paper_id] = full_text
+        
+        print(f"✅ Successfully cached paper {paper_id}")
+        return jsonify({
+            'success': True,
+            'message': 'Paper downloaded and processed successfully',
+            'has_full_text': True,
+            'text_length': len(full_text)
+        })
+        
+    except Exception as e:
+        print(f"❌ Download error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/paper-content/<paper_id>', methods=['GET'])
+def get_paper_content(paper_id):
+    """Get cached paper content for AI questioning"""
+    try:
+        if paper_id not in paper_content_cache:
+            return jsonify({
+                'success': False,
+                'error': 'Paper not found in cache. Please download it first.'
+            }), 404
+        
+        content = paper_content_cache[paper_id]
+        
+        # Return truncated content for preview (full content will be used by AI)
+        preview = content[:1000] + "..." if len(content) > 1000 else content
+        
+        return jsonify({
+            'success': True,
+            'has_content': True,
+            'preview': preview,
+            'full_length': len(content),
+            'message': f'Full text available ({len(content)} characters)'
+        })
+        
+    except Exception as e:
+        print(f"❌ Content retrieval error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/ask-paper/<paper_id>', methods=['POST'])
+def ask_paper_question(paper_id):
+    """Answer questions about a specific paper using its full content"""
+    try:
+        data = request.get_json()
+        question = data.get('question', '')
+        paper_info = data.get('paper_info', {})
+        
+        if not question:
+            return jsonify({
+                'success': False,
+                'error': 'Question is required'
+            }), 400
+        
+        if paper_id not in paper_content_cache:
+            return jsonify({
+                'success': False,
+                'error': 'Paper content not available. Please download the paper first.',
+                'needs_download': True
+            }), 404
+        
+        # Get the full paper content
+        full_content = paper_content_cache[paper_id]
+        
+        # Truncate content if too long (most LLMs have token limits)
+        max_content_length = 15000  # Adjust based on your LLM's context window
+        if len(full_content) > max_content_length:
+            # Try to keep the beginning and end, which often contain important info
+            truncated_content = full_content[:max_content_length//2] + "\n\n[... content truncated ...]\n\n" + full_content[-max_content_length//2:]
+        else:
+            truncated_content = full_content
+        
+        return jsonify({
+            'success': True,
+            'paper_content': truncated_content,
+            'content_length': len(full_content),
+            'is_truncated': len(full_content) > max_content_length,
+            'paper_info': paper_info,
+            'question': question
+        })
+        
+    except Exception as e:
+        print(f"❌ Question processing error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/papers', methods=['GET'])
 def get_papers():
     """Legacy papers endpoint"""
@@ -191,26 +376,51 @@ def get_papers():
     papers = fetch_arxiv_papers_simple(query, max_results)
     return jsonify(papers)
 
+@app.route('/cache-status', methods=['GET'])
+def cache_status():
+    """Get information about cached papers"""
+    cache_info = {}
+    for paper_id, content in paper_content_cache.items():
+        cache_info[paper_id] = {
+            'length': len(content),
+            'preview': content[:200] + "..." if len(content) > 200 else content
+        }
+    
+    return jsonify({
+        'cached_papers': len(paper_content_cache),
+        'papers': cache_info
+    })
+
 @app.route('/', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'message': 'arXiv Research Dashboard API',
-        'version': '3.0',
+        'message': 'arXiv Research Dashboard API with PDF Processing',
+        'version': '4.0',
         'port': 8000,
+        'cached_papers': len(paper_content_cache),
         'endpoints': {
             '/search': 'GET/POST - Search papers',
+            '/download-paper/<id>': 'POST - Download paper PDF',
+            '/paper-content/<id>': 'GET - Get cached paper content',
+            '/ask-paper/<id>': 'POST - Ask questions with full paper context',
+            '/cache-status': 'GET - View cached papers',
             '/papers': 'GET - Legacy search',
             '/': 'GET - Health check'
         }
     })
 
 if __name__ == '__main__':
-    print("🚀 Starting Research Dashboard API on port 8000...")
+    print("🚀 Starting Enhanced Research Dashboard API on port 8000...")
     print("📚 Will try arXiv API first, fallback to mock data if needed")
+    print("📄 PDF processing enabled with PyMuPDF and PyPDF2 fallback")
     print("🌐 CORS enabled for localhost:3000")
     print("💡 Test endpoint: http://127.0.0.1:8000/search?query=machine+learning")
+    print("-" * 50)
+    
+    # Install required packages reminder
+    print("📦 Make sure you have installed: pip install PyPDF2 PyMuPDF")
     print("-" * 50)
     
     app.run(debug=True, host='0.0.0.0', port=8000)
