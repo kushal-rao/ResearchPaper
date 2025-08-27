@@ -8,12 +8,16 @@ import os
 import tempfile
 import PyPDF2
 from io import BytesIO
-import fitz  # PyMuPDF - alternative PDF parser
+import fitz # PyMuPDF - alternative PDF parser
 
 app = Flask(__name__)
 
-# Enable CORS for all routes and origins
-CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000"])
+# --- CHANGE 1: Updated CORS for Production ---
+# Get the frontend URL from an environment variable, with localhost as a fallback
+# for development. This allows your deployed frontend to make requests.
+frontend_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
+allowed_origins = [frontend_url, "http://localhost:3000", "http://127.0.0.1:3000"]
+CORS(app, origins=allowed_origins)
 
 # Store downloaded paper content in memory (in production, use a database)
 paper_content_cache = {}
@@ -398,7 +402,6 @@ def health_check():
         'status': 'healthy',
         'message': 'arXiv Research Dashboard API with PDF Processing',
         'version': '4.0',
-        'port': 8000,
         'cached_papers': len(paper_content_cache),
         'endpoints': {
             '/search': 'GET/POST - Search papers',
@@ -411,16 +414,19 @@ def health_check():
         }
     })
 
-if __name__ == '__main__':
-    print("🚀 Starting Enhanced Research Dashboard API on port 8000...")
-    print("📚 Will try arXiv API first, fallback to mock data if needed")
-    print("📄 PDF processing enabled with PyMuPDF and PyPDF2 fallback")
-    print("🌐 CORS enabled for localhost:3000")
-    print("💡 Test endpoint: http://127.0.0.1:8000/search?query=machine+learning")
-    print("-" * 50)
-    
-    # Install required packages reminder
-    print("📦 Make sure you have installed: pip install PyPDF2 PyMuPDF")
-    print("-" * 50)
-    
-    app.run(debug=True, host='0.0.0.0', port=8000)
+# --- CHANGE 2: Removed Development Server Block ---
+# This block is for local development only. In production, a WSGI server
+# like Gunicorn will run your app, so this is no longer needed.
+# if __name__ == '__main__':
+#     print("🚀 Starting Enhanced Research Dashboard API on port 8000...")
+#     print("📚 Will try arXiv API first, fallback to mock data if needed")
+#     print("📄 PDF processing enabled with PyMuPDF and PyPDF2 fallback")
+#     print("🌐 CORS enabled for localhost:3000")
+#     print("💡 Test endpoint: http://127.0.0.1:8000/search?query=machine+learning")
+#     print("-" * 50)
+#     
+#     # Install required packages reminder
+#     print("📦 Make sure you have installed: pip install PyPDF2 PyMuPDF")
+#     print("-" * 50)
+#     
+#     app.run(debug=True, host='0.0.0.0', port=8000)
